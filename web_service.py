@@ -1,8 +1,8 @@
 # Подключаю библиотеки.
 # FastAPI — сам фреймворк: он принимает запросы от браузера и решает, какую функцию вызвать.
-# Request — объект запроса, он нужен мне там, где я читаю данные из формы.
+# Request — объект запроса, он нужен мне там, где я читаю данные из формы или адресной строки.
 from fastapi import FastAPI, Request
-# RedirectResponse — перенаправление браузера на другой адрес (использую после сохранения заявки).
+# RedirectResponse — перенаправление браузера на другой адрес (после сохранения заявки).
 # HTMLResponse — ответ в формате HTML. Без неё FastAPI отдал бы строку как обычный текст,
 # и браузер показал бы код страницы вместо самой страницы.
 from fastapi.responses import RedirectResponse, HTMLResponse
@@ -10,9 +10,10 @@ from fastapi.responses import RedirectResponse, HTMLResponse
 import uvicorn
 # aiosqlite — асинхронная работа с базой SQLite. Обычный sqlite3 с async/await не совместим.
 import aiosqlite
+# datetime — работа с датой и временем. Новое подключение ради красивого форматирования даты.
+from datetime import datetime
 
-# Создаю приложение. Пока файл запускается, этот объект живёт в памяти,
-# и все декораторы @app... ниже «вешают» мои функции именно на него.
+# Создаю приложение. Все декораторы @app... ниже «вешают» мои функции именно на этот объект.
 app = FastAPI(
     title="MVP: Заявки на выезд мастера",
     description="Простой сервис для приёма и отслеживания заявок.",
@@ -20,15 +21,43 @@ app = FastAPI(
 )
 
 # Имя файла базы данных. SQLite хранит всю базу в одном файле рядом с кодом.
-# Если его нет — он создастся сам при первом запуске.
+# Если файла нет — он создастся сам при первом запуске.
 DB_NAME = "requests.db"
+
+# Словарь-переводчик: статус из базы превращаю в короткое имя класса для CSS.
+# Зачем это нужно: в базе статусы на русском («Новая», «В работе»),
+# а классы принято писать латиницей — так CSS надёжнее и понятнее.
+# Ключ — как в базе, значение — как будет выглядеть class="..." в HTML.
+STATUS_TO_CLASS = {
+    "Новая": "new",
+    "В работе": "in-work",
+    "Готово": "done"
+}
+
+
+def format_date(raw):
+    # Превращаю дату из базы в красивый человеческий вид.
+    # Из базы приходит строка вида "2026-10-21 17:23:23".
+    # strptime читает эту строку ПО ИЗВЕСТНОМУ ШАБЛОНУ и делает из неё объект datetime —
+    # с ним можно работать как с датой, а не как с текстом.
+    # Шаблон %Y-%m-%d %H:%M:%S расшифровывается так:
+    #   %Y — год (4 цифры), %m — месяц (01–12), %d — день,
+    #   %H — часы, %M — минуты, %S — секунды.
+    # Важно: шаблон должен совпадать с реальным содержимым строки посимвольно,
+    # иначе будет ValueError — если однажды увидишь такую ошибку, начинай проверку отсюда.
+    dt = datetime.strptime(raw, "%Y-%m-%d %H:%M:%S")
+    # strftime — обратная операция: превращаю объект datetime обратно в строку,
+    # но уже в том виде, в котором хочу показать человеку.
+    # %d.%m.%Y — день.месяц.год (как принято в России),
+    # %H:%M — часы и минуты. Секунды не показываю — они не нужны.
+    return dt.strftime("%d.%m.%Y %H:%M")
 
 
 async def init_db():
     # Эта функция запускается один раз при старте сервера.
     # Задача — убедиться, что таблица requests существует, и создать её, если её нет.
-    # Так я страхуюсь: могу удалить файл базы или прийти на новый компьютер,
-    # и при запуске всё создастся заново без ошибок.
+    # Страховка: могу удалить файл базы или прийти на новый компьютер —
+    # при запуске всё создастся заново без ошибок. Данные она не стирает.
     async with aiosqlite.connect(DB_NAME) as db:
         cursor = await db.cursor()
         create_table_query = """
@@ -37,49 +66,61 @@ async def init_db():
                 name TEXT NOT NULL,
                 phone TEXT NOT NULL,
                 description TEXT NOT NULL,
-                status TEXT DEFAULT 'Новая'
+                status TEXT DEFAULT 'Новая',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
         """
-        # CREATE TABLE IF NOT EXISTS — создай таблицу, только если её ещё нет.
-        # NOT NULL — значит поле обязательно: база не даст сохранить пустую строку.
-        # DEFAULT 'Новая' — если я не укажу статус, он сам станет «Новая».
-        # Внутри SQL-строки никаких комментариев # писать нельзя: SQL не понимает решётку.
+        # created_at — дата и время создания заявки.
+        # DEFAULT CURRENT_TIMESTAMP — база сама запишет текущий момент при добавлении строки.
+        # Мне не нужно вычислять дату в Python и передавать её руками.
+        # NOT NULL — поле обязательно. DEFAULT — если значение не указано, подставится это.
+        # Внутри SQL-строки никаких комментариев # писать нельзя — SQL не понимает решётку.
         await cursor.execute(create_table_query)
-        # commit — «сохранить» изменения. Без него таблица не зафиксируется.
+        # commit — «сохранить» изменения в базе. Без него таблица не зафиксируется.
         await db.commit()
         print("✅ База данных инициализирована.")
 
 
-async def get_all_requests():
-    # Достаю все заявки из базы и возвращаю списком словарей.
-    # Словари удобны тем, что дальше я пишу req['name'], а не req[1] — по имени всегда ясно, что беру.
+async def get_all_requests(status=None):
+    # Достаю заявки из базы. Необязательный параметр status — это фильтр.
+    # Если фильтр не передан (None), возвращаю все заявки.
     async with aiosqlite.connect(DB_NAME) as db:
-        # row_factory = aiosqlite.Row — включая доступ к колонкам по имени.
-        # Без этой строки каждая строка из базы приходит как кортеж: row[0], row[1] — легко запутаться.
+        # row_factory = aiosqlite.Row — доступ к колонкам по имени: req['name'], а не req[1].
         db.row_factory = aiosqlite.Row
+
+        # Базовый запрос: выбрать всё, потом отсортировать.
+        query = "SELECT * FROM requests"
+        params = []
+
+        # Если фильтр передан — добавляю условие WHERE.
+        # Параметры всегда передаю отдельным списком через плейсхолдеры:
+        # это защита от SQL-инъекций, даже когда параметров несколько.
+        if status:
+            query += " WHERE status = ?"
+            params.append(status)
+
         # ORDER BY id DESC — новые заявки сверху: самый большой id первым.
-        cursor = await db.execute("SELECT * FROM requests ORDER BY id DESC")
+        query += " ORDER BY id DESC"
+
+        cursor = await db.execute(query, params)
         rows = await cursor.fetchall()
-        # fetchall() забирает все строки сразу; дальше просто превращаю их в обычные словари.
         return [dict(row) for row in rows]
 
 
 async def create_new_request(name, phone, description):
     # Сохраняю новую заявку в базу. Вызывается из обработчика формы /create.
+    # Дату не передаю — её база проставит сама через DEFAULT CURRENT_TIMESTAMP.
     async with aiosqlite.connect(DB_NAME) as db:
         cursor = await db.cursor()
         insert_query = "INSERT INTO requests (name, phone, description, status) VALUES (?, ?, ?, ?)"
-        # Знаки вопроса — плейсхолдеры: данные передаются отдельно от запроса.
-        # Это защита от SQL-инъекций: если пользователь впишет в поле кавычки или хитрый текст,
-        # база воспримет его как обычную строку, а не как часть SQL-команды.
-        # Статус пишу сразу «Новая» — это стартовое состояние любой заявки.
+        # Знаки вопроса — плейсхолдеры: данные идут отдельно от запроса.
         await cursor.execute(insert_query, (name, phone, description, "Новая"))
         await db.commit()
 
 
 async def update_request_status(request_id, new_status):
     # Меняю статус одной заявки по её id: например, «Новая» становится «В работе».
-    # WHERE id = ? — важно: обновляю только нужную строку, а не всю таблицу.
+    # WHERE id = ? — обновляю только нужную строку, а не всю таблицу.
     async with aiosqlite.connect(DB_NAME) as db:
         cursor = await db.cursor()
         update_query = "UPDATE requests SET status = ? WHERE id = ?"
@@ -87,47 +128,41 @@ async def update_request_status(request_id, new_status):
         await db.commit()
 
 
-# Теперь про строки с @. Они называются декораторами.
+# Строки с @ называются декораторами.
 # @app.get("/") читается так: «функцию ниже запускай, когда придёт GET-запрос на такой адрес».
-# GET — это когда браузер просто открывает страницу. POST — когда что-то отправляет (например, форму).
-# @app — это моё приложение из строки app = FastAPI(...), на него и вешаются маршруты.
-# Без декоратора FastAPI не знает про функцию: код лежит в файле, но ни на какой адрес не привязан.
+# GET — браузер просто открывает страницу. POST — что-то отправляет (например, форму).
 
 
 @app.get("/")
 async def read_root():
     # Главная страница: отдаю HTML-файл с формой заявки.
-    # Читаю файл с шаблоном и оборачиваю в HTMLResponse — именно это превращает
-    # «строку с кодом» в настоящую страницу, которую браузер рисует.
+    # HTMLResponse превращает строку в настоящую страницу, которую браузер рисует.
     with open("templates/index.html", "r", encoding="utf-8") as f:
         return HTMLResponse(content=f.read())
 
 
 @app.post("/create")
 async def handle_create(request: Request):
-    # Обрабатываю отправку формы. Когда пользователь жмёт «Отправить»,
-    # браузер делает POST-запрос на /create и несёт в нём данные полей.
-    # await request.form() — достаю данные формы; обращаюсь к ним по именам полей:
-    # form_data["name"], form_data["phone"], form_data["description"].
-    # Имена должны совпадать с name="..." в HTML, иначе будет KeyError.
+    # Обрабатываю отправку формы. Браузер делает POST-запрос на /create и несёт в нём данные полей.
+    # Имена полей должны совпадать с name="..." в HTML, иначе будет KeyError.
     form_data = await request.form()
     await create_new_request(
         name=form_data["name"],
         phone=form_data["phone"],
         description=form_data["description"]
     )
-    # После сохранения делаю редирект на /list. Код 303 означает «данные приняты, смотри на другой адрес».
-    # Редирект нужен не для красоты: без него обновление страницы (F5) отправило бы форму второй раз
-    # и появились бы заявки-дубли. А так браузер делает свежий GET на /list, и F5 безопасен.
+    # Редирект на /list с кодом 303: без него обновление страницы отправило бы форму второй раз
+    # и появились бы заявки-дубли.
     return RedirectResponse(url="/list", status_code=303)
 
 
 @app.get("/list")
-async def show_list():
-    # Страница со списком всех заявок.
-    # Схема простая: беру данные из базы, беру шаблон, в цикле собираю строки таблицы,
-    # вставляю их в шаблон вместо метки <!-- REPEAT --> и отдаю готовый HTML.
-    requests = await get_all_requests()
+async def show_list(request: Request):
+    # Страница списка. Умеет принимать фильтр из адреса:
+    # /list — все заявки, /list?status=Новая — только новые, и так далее.
+    # Если параметра в адресе нет, get вернёт None — и фильтр не применится.
+    status_filter = request.query_params.get("status")
+    requests = await get_all_requests(status=status_filter)
 
     with open("templates/list.html", "r", encoding="utf-8") as f:
         html_content = f.read()
@@ -135,16 +170,26 @@ async def show_list():
     # rows_html — сюда я накапливаю HTML всех строк таблицы, по одной на заявку.
     rows_html = ""
     for req in requests:
-        # f-строка позволяет вставлять значения прямо в текст.
+        # По статусу из базы достаю имя класса из словаря STATUS_TO_CLASS.
+        # .get() со вторым аргументом — страховка: если вдруг в базе окажется статус,
+        # которого нет в словаре, вместо ошибки класс просто будет пустым.
+        status_class = STATUS_TO_CLASS.get(req['status'], "")
+
+        # Красивая дата: беру сырую строку из базы и прогоняю через format_date.
+        # В базе хранить остаётся как раньше (это удобно для сортировки),
+        # красивый вид — только на экране.
+        pretty_date = format_date(req['created_at'])
+
+        # class="status ..." — именно на эту метку CSS из list.html навешивает цвет.
         # Каждый req становится одной строкой <tr>...</tr> с ячейками <td>.
-        # Кнопки — обычные ссылки на /set_status с параметрами id и status в адресе.
         rows_html += f"""
             <tr>
                 <td>{req['id']}</td>
                 <td>{req['name']}</td>
                 <td>{req['phone']}</td>
                 <td>{req['description']}</td>
-                <td>{req['status']}</td>
+                <td class="status {status_class}">{req['status']}</td>
+                <td>{pretty_date}</td>
                 <td>
                     <a href="/set_status?id={req['id']}&status=В работе"><button>В работу</button></a>
                     <a href="/set_status?id={req['id']}&status=Готово"><button>Готово</button></a>
@@ -152,9 +197,7 @@ async def show_list():
             </tr>
         """
 
-    # В шаблоне list.html стоит метка <!-- REPEAT --> — место, куда вставляются строки.
-    # replace находит её один раз и подменяет на всё, что я собрал в цикле.
-    # Если заявок нет, на месте метки останется пусто — таблица будет просто с шапкой.
+    # Метка <!-- REPEAT --> в шаблоне — место, куда вставляются собранные строки.
     final_html = html_content.replace("<!-- REPEAT -->", rows_html)
     return HTMLResponse(content=final_html)
 
@@ -164,21 +207,18 @@ async def set_status(request: Request):
     # Смена статуса. Кнопка в таблице ведёт на адрес вида /set_status?id=5&status=Готово.
     # Всё, что после ?, называется query-параметрами — я их отсюда и достаю.
     query_params = request.query_params
-    # .get("id", 0) — если параметра нет, вернётся 0, и код не упадёт.
     req_id = int(query_params.get("id", 0))
     new_status = query_params.get("status", "")
 
     # Меняю базу только если id выглядит нормально и статус реально передан.
-    # Если кто-то вобьёт адрес вручную без параметров — просто вернусь на список без ошибки.
     if req_id > 0 and new_status:
         await update_request_status(req_id, new_status)
 
     return RedirectResponse(url="/list", status_code=303)
 
 
-# Блок запуска. Строка if __name__ == "__main__" означает: этот код выполняется,
+# Блок запуска. if __name__ == "__main__" — код внутри выполняется,
 # только если файл запустили напрямую командой python web_service.py.
-# Если файл кто-то импортирует в другой скрипт — сервер сам не стартует и база не тронется.
 if __name__ == "__main__":
     import asyncio
     # asyncio.run() — способ вызвать асинхронную функцию из обычного кода.
@@ -186,6 +226,5 @@ if __name__ == "__main__":
     asyncio.run(init_db())
     print("🚀 Сервер запускается на http://127.0.0.1:8000")
     # host="0.0.0.0" — слушать все сетевые интерфейсы: сайт доступен и с localhost,
-    # и с другого устройства в той же сети (например, с телефона).
-    # port=8000 — порт, на котором висит сайт.
+    # и с другого устройства в той же сети.
     uvicorn.run(app, host="0.0.0.0", port=8000)
