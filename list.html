@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html>
+<head><title>Список заявок</title></head>
+<body>
+  <h1>Заявки</h1>
+  <p>Фильтр по статусу:
+    <a href="/list?status=new">Новые</a> |
+    <a href="/list?status=in_progress">В работе</a> |
+    <a href="/list?status=done">Выполнено</a> |
+    <a href="/list">Все</a>
+  </p>
+  <table border="1" cellpadding="8">
+    <thead>
+      <tr>
+        <th>ID</th><th>Имя</th><th>Телефон</th><th>Проблема</th>
+        <th>Статус</th><th>Дата</th><th>Сменить статус</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for item in items %}
+      <tr>
+        <td>{{ item.id }}</td>
+        <td>{{ item.name }}</td>
+        <td>{{ item.phone }}</td>
+        <td>{{ item.problem }}</td>
+        <td>{{ item.status }}</td>
+        <td>{{ item.created_at }}</td>
+        <td>
+          <form action="/status/{{ item.id }}" method="put" style="display:inline;">
+            <input type="hidden" name="status" value="in_progress">
+            <button type="submit">В работу</button>
+          </form>
+          <form action="/status/{{ item.id }}" method="put" style="display:inline;">
+            <input type="hidden" name="status" value="done">
+            <button type="submit">Готово</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</body>
+</html>

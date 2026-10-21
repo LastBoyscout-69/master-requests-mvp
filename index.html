@@ -1,0 +1,14 @@
+<!DOCTYPE html>
+<html>
+<head><title>Заявка на выезд мастера</title></head>
+<body>
+  <h1>Заявка на выезд мастера</h1>
+  <form action="/submit" method="post">
+    <label>Ваше имя: <input name="name" required></label><br><br>
+    <label>Телефон: <input name="phone" required></label><br><br>
+    <label>Проблема: <textarea name="problem" required></textarea></label><br><br>
+    <button type="submit">Отправить</button>
+  </form>
+  <p><a href="/list">Список заявок</a></p>
+</body>
+</html>
