@@ -4,7 +4,7 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 import aiosqlite
 
-TOKEN = "8882010503:AAHXabj9_gXHjnMPFgsp9CEBB6q_d9TI-ao"
+TOKEN = ""
 DB_PATH = "requests.db"
 
 logging.basicConfig(level=logging.INFO)
